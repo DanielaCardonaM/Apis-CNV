@@ -1,0 +1,16 @@
+1. Separate files into forward and reverse
+fasterq-dump --split-files SAMPLE
+
+2. compress the output files
+- gzip 
+SAMPLE_1.fastq.gz and SAMPLE_1.fastq.gz
+
+3. Evaluate the quality of the sequences
+fastqc -j /usr/bin/java SAMPLE_1.fastq.gz -o directory
+fastqc -j /usr/bin/java SAMPLE_2.fastq.gz -o directory
+
+4. Clear readings
+trim_galore --quality 30 --length 100 --stringency 5 --paired SAMPLE_1.fastq.gz  SAMPLE_2.fastq.gz
+
+5. Coverage
+samtools depth SAMPLE.sorted.bam | awk '{sum + = $3} END {print "Average= ", sum/NR}' 
