@@ -1,0 +1,90 @@
+#!/bin/bash
+#SBATCH --job-name=Matriz_genoma
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=40G
+#SBATCH --time=20-05:13:03
+#SBATCH --output=Matriz_genoma.out
+#SBATCH --error=Matriz_genoma.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=daniela.cardonam@uqvirtual.edu.co
+
+set -euo pipefail
+
+cd /Tayra-Share/home/Universidades/UQuindio/Users/dcardona/ref_split/ref_split3
+
+# Ruta del GFF completo del genoma
+GFF="/Tayra-Share/home/Universidades/UQuindio/Users/dcardona/genoma/GCF_003254395.2_Amel_HAv3.1_genomic.gff"
+
+echo "== 1) Construyendo genes_all_clean.bed (solo gene/pseudogene, start 0-based) =="
+awk -F'\t' -v OFS='\t' '
+$0!~/^\s*#/ && ($3=="gene" || $3=="pseudogene") {
+  attr=$9; id=""
+  if (attr ~ /(^|;)gene=/)       { match(attr,/(^|;)gene=([^;]+)/,m);       id=m[2] }
+  else if (attr ~ /(^|;)Name=/)  { match(attr,/(^|;)Name=([^;]+)/,m);        id=m[2] }
+  else if (attr ~ /(^|;)locus_tag=/){ match(attr,/(^|;)locus_tag=([^;]+)/,m); id=m[2] }
+  else if (attr ~ /(^|;)ID=/)    { match(attr,/(^|;)ID=([^;]+)/,m);          id=m[2] }
+  gsub(/"/,"",id)
+  if (id!="") {
+    start=$4-1; if (start<0) start=0;  # GFF es 1-based; BED es 0-based
+    print $1, start, $5, id
+  }
+}' "$GFF" | sort -k1,1 -k2,2n -k3,3n | awk '!seen[$0]++' > genes_all_clean.bed
+
+cut -f4 genes_all_clean.bed | sort -u > genes.list
+
+echo "== 2) Descubriendo TODAS las muestras *_CNVs1.bed =="
+SAMPLES="$(ls -1 *_CNVs1.bed | sed 's/_CNVs1\.bed$//' | sort)"
+if [ -z "$SAMPLES" ]; then
+  echo "No se encontraron *_CNVs1.bed"; exit 1
+fi
+echo "$SAMPLES" | tr ' ' '\n' > samples.list
+
+echo "== 3) Intersect gene x muestra => all_intersects.txt (gene \t sample \t tipo) =="
+: > all_intersects.txt
+while read -r s; do
+  bedtools intersect -a genes_all_clean.bed -b "${s}_CNVs1.bed" -wa -wb | \
+  awk -v sample="$s" 'BEGIN{OFS="\t"} {print $4, sample, $8}' >> all_intersects.txt
+done < samples.list
+
+echo "== 4) Cabecera CSV (orden estable) =="
+{
+  printf "Gene_ID"
+  while read -r s; do printf ",%s" "$s"; done < samples.list
+  printf "\n"
+} > CNV_matrix.csv
+
+echo "== 5) Construyendo matriz con prioridad deletion>duplication =="
+awk -v OFS="," -v SUBSEP="\034" '
+BEGIN{
+  # cargar muestras ordenadas
+  ns=0
+  while ((getline s < "samples.list")>0) samp[++ns]=s
+  close("samples.list")
+
+  # cargar intersecciones; prioridad: si ya había duplicación y aparece deletion, gana deletion
+  while ((getline l < "all_intersects.txt")>0) {
+    split(l, f, "\t"); g=f[1]; s=f[2]; t=f[3]
+    key=g SUBSEP s
+    if (!(key in M)) { M[key]=t }
+    else {
+      if (t=="deletion") M[key]="deletion"
+      # si llega duplicación y hay deletion previa, dejamos deletion
+    }
+    genes[g]=1
+  }
+  close("all_intersects.txt")
+}
+{
+  # leer genes.list por STDIN
+  g=$0; if (g=="") next
+  printf "%s", g
+  for (i=1;i<=ns;i++){
+    key=g SUBSEP samp[i]
+    val=(key in M ? M[key] : "0")
+    printf ",%s", val
+  }
+  print ""
+}
+' genes.list >> CNV_matrix.csv
+
+echo "== Hecho: CNV_matrix.csv =="
